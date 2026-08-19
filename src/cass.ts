@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
@@ -1108,12 +1109,67 @@ export async function cassTimeline(
   }
 }
 
+/**
+ * List sessions for a specific workspace via `cass sessions --workspace`.
+ * Used when `cm reflect --workspace` is set so discovery matches the processed-log scope.
+ */
+export async function cassSessionsForWorkspace(
+  workspace: string,
+  options: { days?: number; limit?: number } = {},
+  cassPath = "cass",
+  runner: CassRunner = DEFAULT_CASS_RUNNER
+): Promise<Array<{ path: string; agent: string; modified?: string }>> {
+  const resolvedCassPath = expandPath(cassPath);
+  const limit = Math.max(1, options.limit ?? 2000);
+  const days = options.days;
+  const cutoffMs =
+    typeof days === "number" && days > 0
+      ? Date.now() - days * 24 * 60 * 60 * 1000
+      : null;
+
+  try {
+    const { stdout } = await runner.execFile(
+      resolvedCassPath,
+      ["sessions", "--workspace", workspace, "--limit", String(limit), "--json"],
+      { maxBuffer: 50 * 1024 * 1024, timeout: 60_000 }
+    );
+    const parsed = parseCassJsonOutput(stdout);
+    const list: any[] = Array.isArray(parsed)
+      ? parsed
+      : parsed && typeof parsed === "object" && Array.isArray((parsed as any).sessions)
+        ? (parsed as any).sessions
+        : [];
+
+    const out: Array<{ path: string; agent: string; modified?: string }> = [];
+    for (const s of list) {
+      const path = typeof s?.path === "string" ? s.path : typeof s?.source_path === "string" ? s.source_path : "";
+      if (!path) continue;
+      const modified = typeof s?.modified === "string" ? s.modified : undefined;
+      // No modified timestamp → cannot prove it's inside the lookback window; skip when days is set.
+      if (cutoffMs !== null) {
+        if (!modified) continue;
+        const t = Date.parse(modified);
+        if (Number.isNaN(t) || t < cutoffMs) continue;
+      }
+      out.push({
+        path,
+        agent: typeof s?.agent === "string" ? s.agent : "unknown",
+        ...(modified ? { modified } : {}),
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 export async function findUnprocessedSessions(
   processed: Set<string>,
   options: {
     days?: number;
     maxSessions?: number;
     agent?: string;
+    workspace?: string;
     excludePatterns?: string[];
     includeAll?: boolean;
   },
@@ -1136,36 +1192,53 @@ export async function findUnprocessedSessions(
   const excludePatterns = options.excludePatterns ?? [];
   const includeAll = options.includeAll ?? false;
 
-  // Try timeline first
-  const timeline = await cassTimeline(days, cassPath, runner);
-  const groups = timeline.groups || [];
-
   let allSessions: Array<{ path: string; agent: string }> = [];
 
-  if (Array.isArray(groups) && groups.length > 0) {
-    // Use timeline groups if available
-    allSessions = groups.flatMap((g) =>
-      (g.sessions || []).map((s) => ({ path: s.path, agent: s.agent }))
+  const workspace =
+    typeof options.workspace === "string" && options.workspace.trim()
+      ? options.workspace.trim()
+      : undefined;
+
+  if (workspace) {
+    // Workspace-scoped discovery must match the workspace-scoped processed log.
+    // Global timeline ignores --workspace and would drain unrelated sessions (e.g. ~/scripts)
+    // into this workspace's processed log while the real workspace backlog never moves.
+    allSessions = await cassSessionsForWorkspace(
+      workspace,
+      { days, limit: Math.max(maxSessions * 20, 500) },
+      cassPath,
+      runner
     );
   } else {
-    // Fallback: use broad search queries to discover recent sessions
-    // This works around cass timeline returning empty groups
-    const broadQueries = ["the", "and", "to", "is", "a", "for", "that", "in", "on", "with"];
-    const seenPaths = new Set<string>();
+    // Try timeline first (global)
+    const timeline = await cassTimeline(days, cassPath, runner);
+    const groups = timeline.groups || [];
 
-    for (const query of broadQueries) {
-      if (seenPaths.size >= maxSessions * 3) break; // Get enough candidates
+    if (Array.isArray(groups) && groups.length > 0) {
+      // Use timeline groups if available
+      allSessions = groups.flatMap((g) =>
+        (g.sessions || []).map((s) => ({ path: s.path, agent: s.agent }))
+      );
+    } else {
+      // Fallback: use broad search queries to discover recent sessions
+      // This works around cass timeline returning empty groups
+      const broadQueries = ["the", "and", "to", "is", "a", "for", "that", "in", "on", "with"];
+      const seenPaths = new Set<string>();
 
-      try {
-        const hits = await cassSearch(query, { limit: 50, days }, cassPath, runner);
-        for (const hit of hits) {
-          if (!seenPaths.has(hit.source_path)) {
-            seenPaths.add(hit.source_path);
-            allSessions.push({ path: hit.source_path, agent: hit.agent });
+      for (const query of broadQueries) {
+        if (seenPaths.size >= maxSessions * 3) break; // Get enough candidates
+
+        try {
+          const hits = await cassSearch(query, { limit: 50, days }, cassPath, runner);
+          for (const hit of hits) {
+            if (!seenPaths.has(hit.source_path)) {
+              seenPaths.add(hit.source_path);
+              allSessions.push({ path: hit.source_path, agent: hit.agent });
+            }
           }
+        } catch {
+          // Ignore search errors, try next query
         }
-      } catch {
-        // Ignore search errors, try next query
       }
     }
   }
@@ -1177,10 +1250,18 @@ export async function findUnprocessedSessions(
     return excludePatterns.some((pattern) => pathLower.includes(pattern.toLowerCase()));
   };
 
+  // Prefer filesystem-present sessions; skip deleted/ghost index rows.
   return allSessions
     .filter((s) => !processed.has(s.path))
     .filter((s) => !agentNormalized || (s.agent || "").trim().toLowerCase() === agentNormalized)
     .filter((s) => !matchesExcludePattern(s.path))
+    .filter((s) => {
+      try {
+        return existsSync(s.path);
+      } catch {
+        return false;
+      }
+    })
     .map((s) => s.path)
     .slice(0, maxSessions);
 }

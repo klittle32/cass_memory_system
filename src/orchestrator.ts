@@ -117,6 +117,8 @@ export async function orchestrateReflection(
             days: options.days || config.sessionLookbackDays,
             maxSessions: options.maxSessions || 5,
             agent: options.agent,
+            // Must pass workspace: processed log is per-workspace, discovery must match.
+            workspace: options.workspace,
             excludePatterns: config.sessionExcludePatterns,
             includeAll: config.sessionIncludeAll
           },

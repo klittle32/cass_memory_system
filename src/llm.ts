@@ -837,6 +837,33 @@ export async function llmWithRetry<T>(
   }
 }
 
+/**
+ * Sampling params for generateObject. Newer Anthropic models (Sonnet 5+,
+ * recent Opus/Fable lines) return HTTP 400 when `temperature` is set
+ * ("temperature is deprecated for this model"). Omit sampling fields for
+ * those IDs; keep the prior 0.3/0.35 defaults for models that still accept them.
+ */
+export function samplingOptionsForModel(
+  model: string | undefined,
+  attempt: number = 1
+): { temperature?: number } {
+  const id = (model || "").toLowerCase();
+  // Env escape hatch: force omit for any model (useful if Anthropic expands deprecation).
+  if (process.env.CM_LLM_NO_TEMPERATURE === "1") {
+    return {};
+  }
+  const rejectsTemperature =
+    /claude-sonnet-5\b/.test(id) ||
+    /claude-opus-4-[789]\b/.test(id) ||
+    /claude-fable\b/.test(id) ||
+    /\bsonnet-5\b/.test(id) ||
+    /\bfable\b/.test(id);
+  if (rejectsTemperature) {
+    return {};
+  }
+  return { temperature: attempt > 1 ? 0.35 : 0.3 };
+}
+
 // Explicitly type monitoredGenerateObject to return GenerateObjectResult<T>
 async function monitoredGenerateObject<T>(
   options: any,
@@ -974,13 +1001,16 @@ export async function generateObjectSafe<T>(
         ? `[PREVIOUS ATTEMPT FAILED - OUTPUT MUST BE VALID JSON]\n\n${prompt}\n\nCRITICAL: Your response MUST be valid JSON matching the provided schema exactly. Ensure all required fields are present.`
         : prompt;
 
-      const temperature = attempt > 1 ? 0.35 : 0.3;
+      // Newer Anthropic models (Sonnet 5, recent Opus/Fable) reject `temperature`
+      // with HTTP 400 "temperature is deprecated for this model". Only send it
+      // when the model still accepts sampling params.
+      const temperatureOpts = samplingOptionsForModel(config.model, attempt);
 
       const result = await monitoredGenerateObject<T>({
         model,
         schema,
         prompt: enhancedPrompt,
-        temperature,
+        ...temperatureOpts,
         ...objectGenerationOverrides(config.provider, config.disableStructuredOutputs)
       }, config, "generateObjectSafe", io);
 
@@ -1359,7 +1389,7 @@ export async function llmWithFallback<T>(
         model: llmModel,
         schema,
         prompt,
-        temperature: 0.3,
+        ...samplingOptionsForModel(model, 1),
         // Keyed on the per-iteration fallback provider, not config.provider:
         // a fallback hop to/from openai must get the right request shape.
         ...objectGenerationOverrides(provider, config.disableStructuredOutputs)

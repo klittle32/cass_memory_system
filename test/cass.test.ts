@@ -307,35 +307,53 @@ describe("cass.ts core functions (runner stubbed)", () => {
   });
 
   it("findUnprocessedSessions respects processed set", async () => {
+    const fs = await import("node:fs/promises");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "cm-fup-"));
+    const s1 = path.join(tmp, "s1.jsonl");
+    const s2 = path.join(tmp, "s2.jsonl");
+    await fs.writeFile(s1, "x");
+    await fs.writeFile(s2, "x");
+
     const output = JSON.stringify({
       groups: [
         {
           date: "2025-01-01",
           sessions: [
-            { path: "s1.jsonl", agent: "claude", messageCount: 10, startTime: "10:00", endTime: "11:00" },
-            { path: "s2.jsonl", agent: "claude", messageCount: 5, startTime: "12:00", endTime: "13:00" },
+            { path: s1, agent: "claude", messageCount: 10, startTime: "10:00", endTime: "11:00" },
+            { path: s2, agent: "claude", messageCount: 5, startTime: "12:00", endTime: "13:00" },
           ],
         },
       ],
     });
 
     const runner = createCassRunnerStub({ execStdout: { timeline: output } });
-    const processed = new Set(["s1.jsonl"]);
+    const processed = new Set([s1]);
 
     const result = await findUnprocessedSessions(processed, {}, "cass", runner);
 
     expect(result).toHaveLength(1);
-    expect(result[0]).toBe("s2.jsonl");
+    expect(result[0]).toBe(s2);
   });
 
   it("findUnprocessedSessions normalizes agent filter (trim + case-insensitive)", async () => {
+    const fs = await import("node:fs/promises");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "cm-fup-"));
+    const s1 = path.join(tmp, "s1.jsonl");
+    const s2 = path.join(tmp, "s2.jsonl");
+    await fs.writeFile(s1, "x");
+    await fs.writeFile(s2, "x");
+
     const output = JSON.stringify({
       groups: [
         {
           date: "2025-01-01",
           sessions: [
-            { path: "s1.jsonl", agent: "Claude", messageCount: 10, startTime: "10:00", endTime: "11:00" },
-            { path: "s2.jsonl", agent: "cursor", messageCount: 5, startTime: "12:00", endTime: "13:00" },
+            { path: s1, agent: "Claude", messageCount: 10, startTime: "10:00", endTime: "11:00" },
+            { path: s2, agent: "cursor", messageCount: 5, startTime: "12:00", endTime: "13:00" },
           ],
         },
       ],
@@ -346,18 +364,29 @@ describe("cass.ts core functions (runner stubbed)", () => {
 
     const result = await findUnprocessedSessions(processed, { agent: "  cLaUdE  " }, "cass", runner);
 
-    expect(result).toEqual(["s1.jsonl"]);
+    expect(result).toEqual([s1]);
   });
 
   it("findUnprocessedSessions ignores invalid maxSessions (e.g. negative) instead of slicing from end", async () => {
+    const fs = await import("node:fs/promises");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "cm-fup-"));
+    const s1 = path.join(tmp, "s1.jsonl");
+    const s2 = path.join(tmp, "s2.jsonl");
+    const s3 = path.join(tmp, "s3.jsonl");
+    await fs.writeFile(s1, "x");
+    await fs.writeFile(s2, "x");
+    await fs.writeFile(s3, "x");
+
     const output = JSON.stringify({
       groups: [
         {
           date: "2025-01-01",
           sessions: [
-            { path: "s1.jsonl", agent: "claude", messageCount: 10, startTime: "10:00", endTime: "11:00" },
-            { path: "s2.jsonl", agent: "claude", messageCount: 5, startTime: "12:00", endTime: "13:00" },
-            { path: "s3.jsonl", agent: "claude", messageCount: 5, startTime: "14:00", endTime: "15:00" },
+            { path: s1, agent: "claude", messageCount: 10, startTime: "10:00", endTime: "11:00" },
+            { path: s2, agent: "claude", messageCount: 5, startTime: "12:00", endTime: "13:00" },
+            { path: s3, agent: "claude", messageCount: 5, startTime: "14:00", endTime: "15:00" },
           ],
         },
       ],
@@ -369,7 +398,55 @@ describe("cass.ts core functions (runner stubbed)", () => {
     const result = await findUnprocessedSessions(processed, { maxSessions: -1 }, "cass", runner);
 
     expect(result).toHaveLength(3);
-    expect(result).toEqual(["s1.jsonl", "s2.jsonl", "s3.jsonl"]);
+    expect(result).toEqual([s1, s2, s3]);
+  });
+
+  it("findUnprocessedSessions with workspace uses cass sessions --workspace (not global timeline)", async () => {
+    const recent = new Date().toISOString();
+    const old = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const fs = await import("node:fs/promises");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "cm-ws-"));
+    const p1 = path.join(tmp, "ws-a.jsonl");
+    const p2 = path.join(tmp, "ws-b.jsonl");
+    const pOld = path.join(tmp, "ws-old.jsonl");
+    await fs.writeFile(p1, "x");
+    await fs.writeFile(p2, "x");
+    await fs.writeFile(pOld, "x");
+
+    const sessionsOut = JSON.stringify({
+      sessions: [
+        { path: p1, agent: "claude_code", modified: recent },
+        { path: p2, agent: "codex", modified: recent },
+        { path: pOld, agent: "claude_code", modified: old },
+      ],
+    });
+    // If timeline were used, this would be wrong/foreign — must not appear
+    const timelineOut = JSON.stringify({
+      groups: [
+        {
+          date: "2025-01-01",
+          sessions: [
+            { path: "/foreign/scripts.jsonl", agent: "claude", messageCount: 1, startTime: "", endTime: "" },
+          ],
+        },
+      ],
+    });
+
+    const runner = createCassRunnerStub({
+      execStdout: { sessions: sessionsOut, timeline: timelineOut },
+    });
+    const processed = new Set([p1]);
+
+    const result = await findUnprocessedSessions(
+      processed,
+      { workspace: "/Users/kyle/Code/agentic-enrichment", days: 10, maxSessions: 5 },
+      "cass",
+      runner
+    );
+
+    expect(result).toEqual([p2]); // p1 processed, pOld outside days window
   });
 
   it("safeCassSearch(force) parses output even when cass exits non-zero (leading logs)", async () => {
