@@ -613,6 +613,7 @@ merge:
 { "type": "merge", "bulletIds": string[], "mergedContent": string, "reason": string | null }
 
 RULES:
+- Prefer helpful on an existing bullet ID over add when the lesson is already covered by a bullet in <existing_playbook>.
 - Every key listed above MUST be present in each delta object (use null for unknowns).
 - For "add" deltas, set "kind", "type", "scope" (and harmful "reason") to null UNLESS the
   value is EXACTLY one of the literal strings listed — never invent new enum values.

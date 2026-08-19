@@ -13,7 +13,75 @@ import {
   DecisionLogEntry
 } from "./types.js";
 import { runReflector, type LLMIO } from "./llm.js";
-import { log, now, hashContent } from "./utils.js";
+import { getActiveBullets } from "./playbook.js";
+import { log, now, hashContent, jaccardSimilarity } from "./utils.js";
+
+/** Backstop in `runReflector` is 20k chars; stay at or under that when possible. */
+const REFLECTOR_PROMPT_CHAR_BUDGET = 20_000;
+/** Top remaining (non-core) active bullets by diary Jaccard. */
+const REFLECTOR_SIMILAR_LIMIT = 30;
+
+function diaryBlobForReflector(diary: DiaryEntry): string {
+  return [
+    ...diary.accomplishments,
+    ...diary.decisions,
+    ...diary.challenges,
+    ...diary.keyLearnings,
+  ].join("\n");
+}
+
+function isReflectorCoreBullet(bullet: PlaybookBullet): boolean {
+  return bullet.maturity === "proven" || bullet.maturity === "established";
+}
+
+/**
+ * Choose bullets the reflector can actually vote on.
+ *
+ * `formatBulletsForPrompt(playbook.bullets)` used to dump every rule
+ * (including retired) into a 20k-char middle-truncated slice. With tens of
+ * thousands of drafts the model never saw the voted core, so it emitted
+ * `add` instead of `helpful`/`replace`.
+ *
+ * Order: proven/established (all active), then the top Jaccard matches of
+ * remaining active bullets against the diary blob. Retired/deprecated are
+ * excluded via `getActiveBullets`. When the formatted prompt would exceed
+ * 20k chars, similar drafts are dropped first; the core is never trimmed.
+ */
+export function selectBulletsForReflectorPrompt(
+  playbook: Playbook,
+  diary: DiaryEntry,
+  _config: Config
+): PlaybookBullet[] {
+  const active = getActiveBullets(playbook);
+  const core: PlaybookBullet[] = [];
+  const rest: PlaybookBullet[] = [];
+  for (const bullet of active) {
+    if (isReflectorCoreBullet(bullet)) core.push(bullet);
+    else rest.push(bullet);
+  }
+
+  const blob = diaryBlobForReflector(diary).trim();
+  const similar: PlaybookBullet[] = [];
+  if (blob.length > 0 && rest.length > 0) {
+    const ranked = rest
+      .map((bullet) => ({ bullet, score: jaccardSimilarity(bullet.content, blob) }))
+      .filter((row) => row.score > 0)
+      .sort((a, b) => b.score - a.score || a.bullet.id.localeCompare(b.bullet.id));
+    for (const row of ranked.slice(0, REFLECTOR_SIMILAR_LIMIT)) {
+      similar.push(row.bullet);
+    }
+  }
+
+  const selected = [...core];
+  for (const extra of similar) {
+    const candidate = [...selected, extra];
+    if (formatBulletsForPrompt(candidate).length > REFLECTOR_PROMPT_CHAR_BUDGET) {
+      break;
+    }
+    selected.push(extra);
+  }
+  return selected;
+}
 
 // --- Helper: Summarize Playbook for Prompt ---
 
@@ -371,7 +439,9 @@ export async function reflectOnSession(
 
   const allDeltas: PlaybookDelta[] = [];
   const decisionLog: DecisionLogEntry[] = [];
-  const existingBullets = formatBulletsForPrompt(playbook.bullets);
+  const existingBullets = formatBulletsForPrompt(
+    selectBulletsForReflectorPrompt(playbook, diary, config)
+  );
   const cassHistory = await getCassHistoryForDiary(diary, config);
 
   const maxIterations = config.maxReflectorIterations ?? 3;

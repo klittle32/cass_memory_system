@@ -795,6 +795,7 @@ describe("PROMPTS", () => {
     expect(PROMPTS.reflector).toContain("{existingBullets}");
     expect(PROMPTS.reflector).toContain("{diary}");
     expect(PROMPTS.reflector).toContain("{cassHistory}");
+    expect(PROMPTS.reflector).toContain("Prefer helpful on an existing bullet ID over add");
   });
 
   it("has validator prompt template", () => {
