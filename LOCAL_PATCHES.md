@@ -165,3 +165,40 @@ evidence (2970 helpful / 3349 events, 96 workspace + 13 global); 65 voted
 sources reactivated in 23 scope-disagreeing + 52 archive-missing groups;
 58 zero-helpful successors left out; 224 zero-helpful sources left retired.
 Backup: `playbook.yaml.bak-merge-repair-20260820T180205Z`. Archive untouched.
+
+**Operator note (2026-08-20, F5):** stripped blanket auto-graded harmful
+events (same timestamp+reason+context on more than 8 bullets — the old
+injected-context “hurt” stamp). 3266 events removed from 265 bullets;
+41 active bullets matured (mostly established→proven). Poster
+`b-mri0esaf-leqwqq` is 710/0 proven and still retrieved from AE.
+Real one-off harmful marks kept. Backup:
+`playbook.yaml.bak-f5-harm-20260820T181833Z`. Throwaway script, not in
+repo. No cm rebuild required.
+
+## 2026-08-20 — F1 / issue #2: stop manufacturing recap-shaped adds
+
+**Problem:** New playbook drafts were session recaps and validator memos,
+not reusable next-agent rules. Two plumbing producers, not a missing
+regex: (1) `orchestrateReflection` copied `suggestedRefinement` over
+accepted add content ("Scope the rule to…"); (2) reflector passes 2/3
+were told to find what they missed without seeing pass 1's adds, so they
+re-filed the same lesson in new words.
+
+**Fix:**
+- `src/orchestrator.ts` — do not copy `refinedRule` onto add content;
+  accept/reject still gates. Forward `options.io` into `validateDelta`
+  so tests can reach the validator. `cm validate` still prints
+  refinements to humans.
+- `src/reflect.ts` — after pass 1, drop `add` deltas; later passes may
+  still vote. Pass 2 with only adds early-exits.
+- Tests: `test/orchestrator.test.ts`, `test/reflect.test.ts`.
+- Identifier gate (`isSessionSpecificAdd`) unchanged (A8). Historical
+  drafts not GC'd.
+
+**Install:**
+```bash
+cd ~/Code/cass_memory_system
+cp -p ~/.local/bin/cm ~/.local/bin/cm.bak-0.2.13-pre-f1-$(date +%Y%m%d%H%M%S)
+bun run build
+cp -p dist/cass-memory ~/.local/bin/cm
+```

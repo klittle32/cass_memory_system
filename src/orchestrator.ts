@@ -293,12 +293,11 @@ export async function orchestrateReflection(
         // Validation
         const validatedDeltas: PlaybookDelta[] = [];
         for (const delta of reflectResult.deltas) {
-          const validation = await validateDelta(delta, config);
+          const validation = await validateDelta(delta, config, undefined, options.io);
           if (validation.valid) {
-            // Apply LLM refinement if suggested
-            if (validation.result?.refinedRule && delta.type === "add") {
-              delta.bullet.content = validation.result.refinedRule;
-            }
+            // Do NOT copy validation.result.refinedRule over the bullet: the
+            // validator's suggestedRefinement is advice to the reflector, not
+            // playbook text (fork issue #2). The accepted original stays as-is.
             validatedDeltas.push(delta);
           }
         }

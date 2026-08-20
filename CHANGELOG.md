@@ -8,6 +8,17 @@ All notable changes to **cass-memory** (`cm`) are documented in this file.
 
 ---
 
+## [0.2.14] -- 2026-08-20
+
+Fork `klittle32/cass_memory_system` (GitHub issue #2). Playbook bullets stay
+reusable next-agent rules; session recaps stay in the diary.
+
+- Do not copy the LLM validator's `suggestedRefinement` over an accepted
+  `add`. That string is advice ("Scope the rule to…"), not playbook text.
+- After reflector pass 1, drop further `add` deltas. Later passes may still
+  vote (`helpful` / `harmful` / `replace` / `merge` / `deprecate`) so the
+  same lesson is not filed three times in different words.
+
 ## [0.2.13] -- 2026-07-28
 
 ### Security

@@ -53,11 +53,10 @@ describe("reflectOnSession", () => {
     });
   });
 
-  test("should aggregate unique deltas across iterations", async () => {
+  test("keeps pass-1 adds, drops later-pass adds, keeps later-pass votes", async () => {
     const diary = createTestDiary();
     const playbook = createTestPlaybook();
 
-    // Per-iteration responses: A, B, then A (duplicate)
     const deltaA: PlaybookDelta = {
       type: "add",
       bullet: { content: "Rule A", category: "test" },
@@ -72,11 +71,18 @@ describe("reflectOnSession", () => {
       sourceSession: diary.sessionPath
     };
 
-    // Use a function to return different responses per iteration
+    const vote: PlaybookDelta = {
+      type: "helpful",
+      bulletId: "b-existing-1",
+      sourceSession: diary.sessionPath,
+      context: "applied it"
+    };
+
+    // Pass 1 adds A; pass 2 tries to add B (paraphrase) and votes helpful; pass 3 repeats A.
     let callCount = 0;
     const iterationResponses = [
       { deltas: [deltaA] },
-      { deltas: [deltaB] },
+      { deltas: [deltaB, vote] },
       { deltas: [deltaA] }
     ];
 
@@ -88,11 +94,15 @@ describe("reflectOnSession", () => {
       }
     }, async (io) => {
       const result = await reflectOnSession(diary, playbook, config, io);
-      const deltas = Array.isArray(result) ? result : result.deltas ?? [];
+      const deltas = result.deltas;
 
+      const addContents = deltas.filter((d) => d.type === "add").map((d) => (d as any).bullet.content);
+      expect(addContents).toEqual(["Rule A"]);
+      expect(deltas.some((d) => d.type === "helpful" && d.bulletId === "b-existing-1")).toBe(true);
       expect(deltas).toHaveLength(2);
-      expect(deltas.map(d => d.type === 'add' ? d.bullet.content : '')).toContain("Rule A");
-      expect(deltas.map(d => d.type === 'add' ? d.bullet.content : '')).toContain("Rule B");
+
+      const iter2 = result.decisionLog.find((e) => e.details?.iteration === 2);
+      expect(iter2?.details?.addsDroppedAfterPass1).toBe(1);
     });
   });
 
@@ -103,7 +113,8 @@ describe("reflectOnSession", () => {
     let callCount = 0;
     const iterationResponses = [
       { deltas: [{ type: "add" as const, bullet: { content: "Unique", category: "test" }, reason: "reason", sourceSession: diary.sessionPath }] },
-      { deltas: [{ type: "add" as const, bullet: { content: "Another", category: "test" }, reason: "reason", sourceSession: diary.sessionPath }] },
+      { deltas: [{ type: "helpful" as const, bulletId: "b-existing-2", sourceSession: diary.sessionPath }] },
+      { deltas: [{ type: "helpful" as const, bulletId: "b-existing-3", sourceSession: diary.sessionPath }] },
     ];
 
     await withLlmShim({
@@ -114,8 +125,36 @@ describe("reflectOnSession", () => {
       }
     }, async (io) => {
       const result = await reflectOnSession(diary, playbook, { ...config, maxReflectorIterations: 2 }, io);
-      const deltas = Array.isArray(result) ? result : result.deltas ?? [];
-      expect(deltas.length).toBeGreaterThanOrEqual(2);
+      expect(callCount).toBe(2);
+      expect(result.deltas).toHaveLength(2);
+      expect(result.deltas.filter((d) => d.type === "add")).toHaveLength(1);
+      expect(result.deltas.filter((d) => d.type === "helpful")).toHaveLength(1);
+    });
+  });
+
+  test("exits early when a later pass emits only adds", async () => {
+    const diary = createTestDiary();
+    const playbook = createTestPlaybook();
+
+    let callCount = 0;
+    const iterationResponses = [
+      { deltas: [{ type: "add" as const, bullet: { content: "First pass rule", category: "test" }, reason: "r", sourceSession: diary.sessionPath }] },
+      { deltas: [{ type: "add" as const, bullet: { content: "First pass rule, reworded", category: "test" }, reason: "r", sourceSession: diary.sessionPath }] },
+      { deltas: [{ type: "add" as const, bullet: { content: "Third pass paraphrase", category: "test" }, reason: "r", sourceSession: diary.sessionPath }] },
+    ];
+
+    await withLlmShim({
+      reflector: () => {
+        const response = iterationResponses[callCount] || { deltas: [] };
+        callCount++;
+        return response;
+      }
+    }, async (io) => {
+      const result = await reflectOnSession(diary, playbook, { ...config, maxReflectorIterations: 3 }, io);
+      expect(callCount).toBe(2);
+      expect(result.deltas).toHaveLength(1);
+      expect((result.deltas[0] as any).bullet.content).toBe("First pass rule");
+      expect(result.decisionLog.some((e) => e.reason.startsWith("Early exit at iteration 2"))).toBe(true);
     });
   });
 });

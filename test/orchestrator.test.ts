@@ -112,6 +112,111 @@ describe("orchestrateReflection (unit)", () => {
     });
   });
 
+  test("validator suggestedRefinement is not written over an accepted add's content", async () => {
+    // Fork issue #2: validateDelta maps the LLM validator's suggestedRefinement
+    // to refinedRule, and the orchestrator used to copy that advisory prose
+    // ("Scope the rule to...") over the bullet content. The accepted original
+    // must be what lands in the playbook.
+    //
+    // Reaching runValidator requires the evidence gate to see 1-4 sessions
+    // with success language (0 sessions short-circuits to draft without any
+    // LLM call; >=5 auto-accepts as active). A fake `cass` binary provides
+    // those hits; an injected LLMIO answers the validator with ACCEPT plus a
+    // refinement.
+    await withIsolatedHome(async (env) => {
+      writeFileSync(env.playbookPath, yaml.stringify(createTestPlaybook([])), "utf-8");
+
+      const sessionPath = path.join(env.home, "sessions", "s1.jsonl");
+      writeJsonlSession(sessionPath, [
+        { role: "user", content: "Commit hygiene question: which files should a worker stage before committing in the shared tree?" },
+        { role: "assistant", content: "Stage only the files you touched plus .beads/; never use git add -A in a shared worktree." },
+      ]);
+
+      const hits = [
+        { source_path: "/fake/s1.jsonl", line_number: 1, snippet: "fixed the stray-file commit by staging only touched files", agent: "stub", score: 0.02 },
+        { source_path: "/fake/s2.jsonl", line_number: 1, snippet: "discussed staging discipline for the shared worktree", agent: "stub", score: 0.019 },
+      ];
+      const fakeCass = path.join(env.home, "bin", "cass");
+      mkdirSync(path.dirname(fakeCass), { recursive: true });
+      writeFileSync(
+        fakeCass,
+        [
+          "#!/bin/sh",
+          'case "$1" in',
+          '  --version) echo "cass 0.0.0-fake" ;;',
+          `  search) cat <<'JSON'`,
+          JSON.stringify(hits),
+          "JSON",
+          "  ;;",
+          '  export) echo "user: which files should a worker stage before committing?"; echo "assistant: stage only the files you touched plus .beads/; never git add -A." ;;',
+          "  *) exit 1 ;;",
+          "esac",
+          "",
+        ].join("\n"),
+        { mode: 0o755 }
+      );
+
+      const originalRule = "Stage only your own touched files plus .beads/ before committing; never git add -A.";
+      const refinement = "Scope the rule to what's evidenced: workers should stage only their own touched files plus .beads/ in the shared worktree.";
+
+      const config = createTestConfig({
+        playbookPath: env.playbookPath,
+        diaryDir: env.diaryDir,
+        cassPath: fakeCass,
+        validationEnabled: true,
+      });
+
+      await withEnv({ CASS_MEMORY_LLM: "none" }, async () => {
+        await withLlmShim({
+          reflector: {
+            deltas: [{
+              type: "add",
+              bullet: { content: originalRule, category: "git", tags: [] },
+              reason: "Prevents sweeping peer WIP into commits",
+              sourceSession: "stub",
+            }]
+          }
+        }, async (shimIo) => {
+          let validatorCalls = 0;
+          const io = {
+            generateObject: async <T,>(options: any) => {
+              const prompt: string = options?.prompt || "";
+              if (prompt.includes("scientific validator")) {
+                validatorCalls++;
+                return {
+                  object: {
+                    verdict: "ACCEPT",
+                    confidence: 0.8,
+                    reason: "Directly evidenced in the session.",
+                    evidence: { supporting: ["staging only touched files fixed the stray commit"], contradicting: [] },
+                    suggestedRefinement: refinement,
+                  },
+                } as any;
+              }
+              return shimIo.generateObject<T>(options);
+            },
+          };
+
+          const outcome = await orchestrateReflection(config, { session: sessionPath, io });
+
+          expect(outcome.errors).toEqual([]);
+          expect(outcome.sessionsProcessed).toBe(1);
+          expect(outcome.deltasGenerated).toBe(1);
+          // The LLM validator must actually have been consulted (not the
+          // zero-evidence draft short-circuit), or this test is vacuous.
+          expect(validatorCalls).toBe(1);
+
+          const saved = readPlaybook(env.playbookPath);
+          const added = (saved?.bullets || []).filter((b: any) => b.content === originalRule || b.content === refinement);
+          expect(added).toHaveLength(1);
+          expect(added[0].content).toBe(originalRule);
+          expect(added[0].content).not.toBe(refinement);
+          expect(added[0].content.startsWith("Scope the rule to")).toBe(false);
+        });
+      });
+    });
+  });
+
   test("dryRun returns deltas but does not modify the playbook", async () => {
     await withIsolatedHome(async (env) => {
       writeFileSync(env.playbookPath, yaml.stringify(createTestPlaybook([])), "utf-8");

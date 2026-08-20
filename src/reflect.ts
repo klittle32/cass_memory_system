@@ -555,9 +555,19 @@ export async function reflectOnSession(
       // fields must be collapsed to `undefined` before curation. "add" deltas
       // always get `sourceSession` injected from the diary, overriding any
       // value the LLM may have supplied.
-      const validDeltas: PlaybookDelta[] = output.deltas.map(d =>
+      const normalizedDeltas: PlaybookDelta[] = output.deltas.map(d =>
         normalizeLLMDelta(d, diary.sessionPath, diary.workspace)
       );
+
+      // Only the first pass may mint new rules. Later passes are prompted to
+      // find "what you missed" without seeing pass 1's adds, so their adds are
+      // overwhelmingly paraphrases of the same session's lesson (issue #2).
+      // Votes and edits on existing ids (helpful/harmful/replace/merge/
+      // deprecate) stay allowed on every pass.
+      const validDeltas = i > 0
+        ? normalizedDeltas.filter((d) => d.type !== "add")
+        : normalizedDeltas;
+      const addsDroppedAfterPass1 = normalizedDeltas.length - validDeltas.length;
 
       const uniqueDeltas = deduplicateDeltas(validDeltas, allDeltas);
       const duplicatesRemoved = validDeltas.length - uniqueDeltas.length;
@@ -566,12 +576,13 @@ export async function reflectOnSession(
         timestamp: now(),
         phase: "add",
         action: uniqueDeltas.length > 0 ? "accepted" : "skipped",
-        reason: `Iteration ${i + 1}: ${uniqueDeltas.length} unique deltas (${duplicatesRemoved} duplicates removed)`,
+        reason: `Iteration ${i + 1}: ${uniqueDeltas.length} unique deltas (${duplicatesRemoved} duplicates removed, ${addsDroppedAfterPass1} adds dropped after pass 1)`,
         details: {
           iteration: i + 1,
-          generatedCount: validDeltas.length,
+          generatedCount: normalizedDeltas.length,
           uniqueCount: uniqueDeltas.length,
-          duplicatesRemoved
+          duplicatesRemoved,
+          addsDroppedAfterPass1
         }
       });
 
