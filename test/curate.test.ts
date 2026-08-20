@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "bun:test";
-import { curatePlaybook } from "../src/curate";
+import { curatePlaybook, isSessionSpecificAdd } from "../src/curate";
 import { Playbook, PlaybookDelta, Config } from "../src/types";
 import {
   createTestConfig,
@@ -8,6 +8,22 @@ import {
   createFeedbackEvent,
   daysAgo
 } from "./helpers/factories";
+
+describe("isSessionSpecificAdd", () => {
+  it("rejects store_sku, bead ids, and 8+ digit product ids", () => {
+    expect(isSessionSpecificAdd("store_sku 48040689 consistency review")).toBe(true);
+    expect(isSessionSpecificAdd("Closed bead codex-zdml after the review")).toBe(true);
+    expect(isSessionSpecificAdd("Product 48040689 pack count matched")).toBe(true);
+    expect(isSessionSpecificAdd("SKU 48040 matched the vendor pack size")).toBe(true);
+  });
+
+  it("does not reject generic bead or enrichment workflow text", () => {
+    expect(isSessionSpecificAdd("Never git add -A in a shared enrichment worktree")).toBe(false);
+    expect(isSessionSpecificAdd("When closing a bead, vote existing playbook rules instead of minting new ones")).toBe(false);
+    expect(isSessionSpecificAdd("Prefer helpful on an existing bullet id over add")).toBe(false);
+    expect(isSessionSpecificAdd("Version 1.2.3 and ticket 4804067 are fine")).toBe(false);
+  });
+});
 
 describe("curatePlaybook", () => {
   let config: Config;
@@ -216,6 +232,120 @@ describe("curatePlaybook", () => {
 
       expect(result.applied).toBe(0);
       expect(result.skipped).toBe(1);
+    });
+
+    it("skips session-specific add with store_sku and eight-digit id", () => {
+      const delta: PlaybookDelta = {
+        type: "add",
+        bullet: {
+          content: "store_sku 48040689 consistency review: pack count matched Compass",
+          category: "enrichment",
+          scope: "workspace",
+          kind: "workflow_rule"
+        },
+        sourceSession: "/session/kraft.jsonl",
+        reason: "One SKU outcome"
+      };
+
+      const result = curatePlaybook(emptyPlaybook, [delta], config);
+
+      expect(result.applied).toBe(0);
+      expect(result.skipped).toBe(1);
+      expect(result.playbook.bullets).toHaveLength(0);
+      expect(result.decisionLog?.some(e => e.reason === "session-specific add rejected")).toBe(true);
+    });
+
+    it("skips session-specific add that names a bead id", () => {
+      const delta: PlaybookDelta = {
+        type: "add",
+        bullet: {
+          content: "Closed codex-zdml after the Kraft Tool pack-count check",
+          category: "enrichment",
+          scope: "workspace",
+          kind: "workflow_rule"
+        },
+        sourceSession: "/session/bead.jsonl",
+        reason: "One bead outcome"
+      };
+
+      const result = curatePlaybook(emptyPlaybook, [delta], config);
+
+      expect(result.applied).toBe(0);
+      expect(result.skipped).toBe(1);
+      expect(result.playbook.bullets).toHaveLength(0);
+      expect(result.decisionLog?.some(e => e.reason === "session-specific add rejected")).toBe(true);
+    });
+
+    it("skips session-specific add with SKU number phrasing", () => {
+      const delta: PlaybookDelta = {
+        type: "add",
+        bullet: {
+          content: "SKU 48040 matched the vendor pack size on this pass",
+          category: "enrichment",
+          scope: "workspace",
+          kind: "workflow_rule"
+        },
+        sourceSession: "/session/sku.jsonl",
+        reason: "SKU phrasing"
+      };
+
+      const result = curatePlaybook(emptyPlaybook, [delta], config);
+
+      expect(result.applied).toBe(0);
+      expect(result.skipped).toBe(1);
+      expect(result.playbook.bullets).toHaveLength(0);
+    });
+
+    it("does not reinforce similar bullets for session-specific adds", () => {
+      const existing = createTestBullet({
+        id: "existing-sku-adj",
+        content: "store_sku 48040689 pack count matched Compass",
+        category: "enrichment",
+        helpfulCount: 2
+      });
+      const playbook = createTestPlaybook([existing]);
+
+      const delta: PlaybookDelta = {
+        type: "add",
+        bullet: {
+          content: "store_sku 48040689 pack count matched Compass",
+          category: "enrichment",
+          scope: "workspace",
+          kind: "workflow_rule"
+        },
+        sourceSession: "/session/dup.jsonl",
+        reason: "Exact SKU recap"
+      };
+
+      const result = curatePlaybook(playbook, [delta], config);
+
+      expect(result.applied).toBe(0);
+      expect(result.skipped).toBe(1);
+      expect(result.playbook.bullets).toHaveLength(1);
+      expect(result.playbook.bullets[0].helpfulCount).toBe(2);
+    });
+
+    it("still applies generic workflow adds about enrichment", () => {
+      const delta: PlaybookDelta = {
+        type: "add",
+        bullet: {
+          content: "Never git add -A in a shared enrichment worktree",
+          category: "git",
+          scope: "workspace",
+          kind: "workflow_rule"
+        },
+        sourceSession: "/session/workflow.jsonl",
+        reason: "Reusable workflow lesson"
+      };
+
+      const result = curatePlaybook(emptyPlaybook, [delta], config);
+
+      expect(result.applied).toBe(1);
+      expect(result.skipped).toBe(0);
+      expect(result.playbook.bullets).toHaveLength(1);
+      expect(result.playbook.bullets[0].content).toBe(
+        "Never git add -A in a shared enrichment worktree"
+      );
     });
 
     it("adds multiple unique bullets", () => {

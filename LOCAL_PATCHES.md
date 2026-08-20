@@ -57,3 +57,75 @@ cp -p ~/.local/bin/cm ~/.local/bin/cm.bak-0.2.13-pre-reflector-gold-$(date +%Y%m
 bun run build
 cp -p dist/cass-memory ~/.local/bin/cm
 ```
+
+## 2026-08-19 — diary vs playbook gate
+
+**Problem:** Reflector `add` deltas for one-SKU / one-bead / one-session
+recaps (e.g. Kraft Tool `store_sku 48040689`, `codex-zdml`) entered the
+playbook as drafts. Diaries are the right layer for those recaps;
+the playbook should only hold reusable next-agent rules.
+
+**Fix:**
+- `src/curate.ts` — `isSessionSpecificAdd()` fail-closed skip on `add`
+  (`store_sku`, `codex-[a-z0-9]{3,}`, 8+ digit tokens, `SKU \d{5,}`).
+  Does not insert and does not reinforce similar. Decision reason:
+  `session-specific add rejected`. Generic "bead"/"enrichment" text still
+  adds. Does **not** skip those sessions in the reflect picker — diaries
+  still write.
+- `src/llm.ts` — reflector RULES: do not `add` SKU/bead/session-outcome
+  recaps; they belong in the diary; prefer `helpful` on an existing id.
+- `test/curate.test.ts` — helper + curator skip/allow cases.
+
+**Install:**
+```bash
+cd ~/Code/cass_memory_system
+cp -p ~/.local/bin/cm ~/.local/bin/cm.bak-0.2.13-pre-diary-playbook-$(date +%Y%m%d%H%M%S)
+bun run build
+cp -p dist/cass-memory ~/.local/bin/cm
+```
+
+## 2026-08-20 — playbook hygiene (A1/A2/A3/A5/A6)
+
+**Problem:** AE workspace rules were invisible to `cm context` (stored
+`workspace: agentic-enrichment` never equalled the canonical cwd); reflector
+adds filed under 20+ free-text workspace spellings; `cm reflect` merges
+minted a zero-event global successor and retired voted sources; the
+reflector core (368 proven/established, ~186k chars) blew the 20k prompt
+block so relevant ids were never seen; Grok/Prime/Letta diaries were
+`agent: unknown`; Codex `<recommended_plugins>` junk polluted history.
+
+**Fix:**
+- A1 `src/orchestrator.ts` — `diary.workspace` = canonical `--workspace`
+  (expand `~`, resolve, best-effort realpath) only when supplied; not resaved.
+  `src/reflect.ts` — adds with missing scope or `scope: workspace` are filed
+  at the canonical path (LLM value overridden); explicit
+  global/language/framework/task preserved. Same rule on the stub path.
+  `src/commands/context.ts` — workspace bullets match by canonical equality
+  OR legacy basename-only value == basename(effective workspace).
+- A2 `src/orchestrator.ts` — merge decomposition resolves every source,
+  rejects missing sources / scope-workspace disagreement / incompatible
+  existing replacement; source deprecations are deferred until the
+  destination is confirmed in its locked playbook; destination receives
+  exact-deduplicated `feedbackEvents` (type,timestamp,sessionPath,reason,
+  context,decayedValue), unioned `sourceSessions`/`sourceAgents` (placeholder
+  `merged-operation`/`unknown` replaced), counts from the event array, and
+  maturity via `calculateMaturityState`. No YAML/archive repair.
+- A3 `src/reflect.ts` — `selectBulletsForReflectorPrompt`: active only;
+  workspace-matching proven/established before global, ordered by maturity,
+  helpfulCount desc, id; core capped ~16k formatted chars; diary-similar fill;
+  hard ≤20k guarantee on `formatBulletsForPrompt(selected)`. Not every
+  global proven rule is guaranteed a slot.
+- A5 `src/diary.ts`, `src/utils.ts` — `.grok/sessions`,
+  `.prime/agent/sessions`, `.letta/transcripts` (POSIX + Windows) → `grok`,
+  `prime`, `letta`. `crossAgent.agents` untouched.
+- A6 `src/commands/context.ts` — explicit `--workspace` forwards the canonical
+  path to cass history; absent flag stays unscoped. Drops only hits with
+  `xmodel-doc-peer-` in the source path or `<recommended_plugins>` in the
+  snippet.
+
+**Install:**
+```bash
+cd ~/Code/cass_memory_system
+bun run build
+cp -p dist/cass-memory ~/.local/bin/cm
+```

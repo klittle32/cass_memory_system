@@ -15,9 +15,12 @@ import {
 import { runReflector, type LLMIO } from "./llm.js";
 import { getActiveBullets } from "./playbook.js";
 import { log, now, hashContent, jaccardSimilarity } from "./utils.js";
+import path from "node:path";
 
-/** Backstop in `runReflector` is 20k chars; stay at or under that when possible. */
+/** Backstop in `runReflector` is 20k chars; never exceed it for the formatted playbook block. */
 const REFLECTOR_PROMPT_CHAR_BUDGET = 20_000;
+/** Approximate formatted-char cap for the proven/established core; the rest is diary-similar fill. */
+const REFLECTOR_CORE_CHAR_BUDGET = 16_000;
 /** Top remaining (non-core) active bullets by diary Jaccard. */
 const REFLECTOR_SIMILAR_LIMIT = 30;
 
@@ -34,6 +37,30 @@ function isReflectorCoreBullet(bullet: PlaybookBullet): boolean {
   return bullet.maturity === "proven" || bullet.maturity === "established";
 }
 
+/** Workspace identity used by the selector: canonical equality or legacy basename match. */
+function bulletMatchesWorkspace(bullet: PlaybookBullet, workspace: string): boolean {
+  if (bullet.scope !== "workspace" || !bullet.workspace) return false;
+  if (bullet.workspace === workspace) return true;
+  const stored = bullet.workspace.trim();
+  const isBasenameOnly = stored !== "" && !stored.startsWith("~") && !stored.includes("/") && !stored.includes("\\");
+  return isBasenameOnly && stored === path.basename(workspace);
+}
+
+const MATURITY_RANK: Record<string, number> = { proven: 0, established: 1, candidate: 2, deprecated: 3 };
+
+function compareCoreBullets(a: PlaybookBullet, b: PlaybookBullet): number {
+  const ma = MATURITY_RANK[a.maturity] ?? 9;
+  const mb = MATURITY_RANK[b.maturity] ?? 9;
+  if (ma !== mb) return ma - mb;
+  if ((b.helpfulCount || 0) !== (a.helpfulCount || 0)) return (b.helpfulCount || 0) - (a.helpfulCount || 0);
+  return a.id.localeCompare(b.id);
+}
+
+/** Per-bullet contribution to `formatBulletsForPrompt` output (category headers add a little more). */
+function formattedBulletLength(bullet: PlaybookBullet): number {
+  return `- [${bullet.id}] ★ ${bullet.content} (${bullet.helpfulCount}+ / ${bullet.harmfulCount}-)\n`.length;
+}
+
 /**
  * Choose bullets the reflector can actually vote on.
  *
@@ -42,10 +69,13 @@ function isReflectorCoreBullet(bullet: PlaybookBullet): boolean {
  * thousands of drafts the model never saw the voted core, so it emitted
  * `add` instead of `helpful`/`replace`.
  *
- * Order: proven/established (all active), then the top Jaccard matches of
- * remaining active bullets against the diary blob. Retired/deprecated are
- * excluded via `getActiveBullets`. When the formatted prompt would exceed
- * 20k chars, similar drafts are dropped first; the core is never trimmed.
+ * Active bullets only. Core = proven/established, workspace-matching rules
+ * first (canonical path or legacy basename equal to the diary workspace),
+ * then global; ordered by maturity, helpfulCount desc, id. The core is capped
+ * at ~16k formatted chars, then the top Jaccard matches of the remaining
+ * active bullets against the diary blob fill the rest. The returned
+ * selection never formats to more than 20k chars. Not every global proven
+ * rule is guaranteed a slot.
  */
 export function selectBulletsForReflectorPrompt(
   playbook: Playbook,
@@ -53,11 +83,35 @@ export function selectBulletsForReflectorPrompt(
   _config: Config
 ): PlaybookBullet[] {
   const active = getActiveBullets(playbook);
-  const core: PlaybookBullet[] = [];
+  const workspace = typeof diary.workspace === "string" && diary.workspace.trim() !== "" ? diary.workspace : undefined;
+  const workspaceCore: PlaybookBullet[] = [];
+  const globalCore: PlaybookBullet[] = [];
   const rest: PlaybookBullet[] = [];
   for (const bullet of active) {
-    if (isReflectorCoreBullet(bullet)) core.push(bullet);
-    else rest.push(bullet);
+    if (!isReflectorCoreBullet(bullet)) {
+      rest.push(bullet);
+    } else if (workspace && bulletMatchesWorkspace(bullet, workspace)) {
+      workspaceCore.push(bullet);
+    } else {
+      globalCore.push(bullet);
+    }
+  }
+  workspaceCore.sort(compareCoreBullets);
+  globalCore.sort(compareCoreBullets);
+
+  const selected: PlaybookBullet[] = [];
+  const selectedIds = new Set<string>();
+  let estimate = 0;
+  for (const bullet of [...workspaceCore, ...globalCore]) {
+    const len = formattedBulletLength(bullet);
+    if (selected.length > 0 && estimate + len > REFLECTOR_CORE_CHAR_BUDGET) continue;
+    selected.push(bullet);
+    selectedIds.add(bullet.id);
+    estimate += len;
+  }
+  // Core bullets that did not fit the core budget are still eligible as diary-similar fill.
+  for (const bullet of [...workspaceCore, ...globalCore]) {
+    if (!selectedIds.has(bullet.id)) rest.push(bullet);
   }
 
   const blob = diaryBlobForReflector(diary).trim();
@@ -72,13 +126,17 @@ export function selectBulletsForReflectorPrompt(
     }
   }
 
-  const selected = [...core];
   for (const extra of similar) {
     const candidate = [...selected, extra];
     if (formatBulletsForPrompt(candidate).length > REFLECTOR_PROMPT_CHAR_BUDGET) {
       break;
     }
     selected.push(extra);
+  }
+
+  // Hard guarantee: drop from the tail until the formatted block fits.
+  while (selected.length > 1 && formatBulletsForPrompt(selected).length > REFLECTOR_PROMPT_CHAR_BUDGET) {
+    selected.pop();
   }
   return selected;
 }
@@ -308,15 +366,36 @@ const ReflectorOutputSchema = z.object({
 type LLMReflectorDelta = z.infer<typeof LLMPlaybookDeltaSchema>;
 
 /**
+ * Filing rule for reflector adds when the diary carries a canonical workspace:
+ * missing scope -> workspace-scoped at the canonical path; explicit workspace
+ * scope -> canonical path overrides the LLM's free-text value; explicit
+ * global/language/framework/task scope is preserved as-is.
+ */
+function normalizeAddScope(
+  scope: PlaybookBullet["scope"] | undefined,
+  llmWorkspace: string | undefined,
+  diaryWorkspace: string | undefined
+): { scope?: PlaybookBullet["scope"]; workspace?: string } {
+  if (!diaryWorkspace) {
+    return { scope, workspace: llmWorkspace };
+  }
+  if (scope === undefined || scope === "workspace") {
+    return { scope: "workspace", workspace: diaryWorkspace };
+  }
+  return { scope, workspace: llmWorkspace };
+}
+
+/**
  * Normalize an LLM-produced delta (strict schema with nullable fields) to a
  * domain `PlaybookDelta`. Null LLM values collapse to `undefined` so they
  * stop being serialized and match the domain's `.optional()` contract.
  * `sourceSession` on "add" is always rewritten by the caller, so we pass a
  * placeholder here and let `reflectOnSession` overwrite it.
  */
-function normalizeLLMDelta(d: LLMReflectorDelta, sessionPath: string): PlaybookDelta {
+function normalizeLLMDelta(d: LLMReflectorDelta, sessionPath: string, workspace?: string): PlaybookDelta {
   switch (d.type) {
-    case "add":
+    case "add": {
+      const filing = normalizeAddScope(d.bullet.scope ?? undefined, d.bullet.workspace ?? undefined, workspace);
       return {
         type: "add",
         bullet: {
@@ -325,8 +404,8 @@ function normalizeLLMDelta(d: LLMReflectorDelta, sessionPath: string): PlaybookD
           ...(d.bullet.kind !== null ? { kind: d.bullet.kind } : {}),
           ...(d.bullet.type !== null ? { type: d.bullet.type } : {}),
           ...(d.bullet.isNegative !== null ? { isNegative: d.bullet.isNegative } : {}),
-          ...(d.bullet.scope !== null ? { scope: d.bullet.scope } : {}),
-          ...(d.bullet.workspace !== null ? { workspace: d.bullet.workspace } : {}),
+          ...(filing.scope !== undefined ? { scope: filing.scope } : {}),
+          ...(filing.workspace !== undefined ? { workspace: filing.workspace } : {}),
           ...(d.bullet.searchPointer !== null ? { searchPointer: d.bullet.searchPointer } : {}),
           ...(d.bullet.tags !== null ? { tags: d.bullet.tags } : {}),
         },
@@ -339,6 +418,7 @@ function normalizeLLMDelta(d: LLMReflectorDelta, sessionPath: string): PlaybookD
         // rule's provenance (see issue #58). Always overwrite with sessionPath.
         sourceSession: sessionPath
       };
+    }
     case "helpful":
       return {
         type: "helpful",
@@ -417,7 +497,18 @@ export async function reflectOnSession(
 
         for (const iteration of stubIterations) {
           const injected = iteration.deltas.map((d) => {
-            if (d.type === "add") return { ...d, sourceSession: diary.sessionPath };
+            if (d.type === "add") {
+              const filing = normalizeAddScope(d.bullet?.scope, d.bullet?.workspace, diary.workspace);
+              return {
+                ...d,
+                bullet: {
+                  ...d.bullet,
+                  ...(filing.scope !== undefined ? { scope: filing.scope } : {}),
+                  ...(filing.workspace !== undefined ? { workspace: filing.workspace } : {}),
+                },
+                sourceSession: diary.sessionPath,
+              };
+            }
             if ((d.type === "helpful" || d.type === "harmful") && !d.sourceSession) {
               return { ...d, sourceSession: diary.sessionPath };
             }
@@ -465,7 +556,7 @@ export async function reflectOnSession(
       // always get `sourceSession` injected from the diary, overriding any
       // value the LLM may have supplied.
       const validDeltas: PlaybookDelta[] = output.deltas.map(d =>
-        normalizeLLMDelta(d, diary.sessionPath)
+        normalizeLLMDelta(d, diary.sessionPath, diary.workspace)
       );
 
       const uniqueDeltas = deduplicateDeltas(validDeltas, allDeltas);

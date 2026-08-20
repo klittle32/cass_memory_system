@@ -27,6 +27,23 @@ import {
   getDecayedCounts 
 } from "./scoring.js";
 
+// Session-specific recaps belong in the diary, not the playbook.
+// Do not treat the words "bead" or "enrichment" alone as session-specific.
+const SESSION_SPECIFIC_STORE_SKU = /\bstore_sku\b/i;
+const SESSION_SPECIFIC_BEAD_ID = /\bcodex-[a-z0-9]{3,}\b/i;
+const SESSION_SPECIFIC_DIGIT_ID = /\b\d{8,}\b/;
+const SESSION_SPECIFIC_SKU_NUMBER = /\bSKU\s+\d{5,}\b/i;
+
+export function isSessionSpecificAdd(content: string): boolean {
+  if (!content) return false;
+  return (
+    SESSION_SPECIFIC_STORE_SKU.test(content) ||
+    SESSION_SPECIFIC_BEAD_ID.test(content) ||
+    SESSION_SPECIFIC_DIGIT_ID.test(content) ||
+    SESSION_SPECIFIC_SKU_NUMBER.test(content)
+  );
+}
+
 function findSimilarBulletFromMeta(
   newTokens: Set<string>,
   metaList: ConflictMeta[],
@@ -285,6 +302,14 @@ export function curatePlaybook(
         }
 
         const content = delta.bullet.content;
+
+        if (isSessionSpecificAdd(content)) {
+          logDecision(decisionLog, "add", "rejected", "session-specific add rejected", {
+            content: content.slice(0, 100)
+          });
+          break;
+        }
+
         const hash = hashContent(content);
 
         // Conflict detection (warnings only)

@@ -796,6 +796,8 @@ describe("PROMPTS", () => {
     expect(PROMPTS.reflector).toContain("{diary}");
     expect(PROMPTS.reflector).toContain("{cassHistory}");
     expect(PROMPTS.reflector).toContain("Prefer helpful on an existing bullet ID over add");
+    expect(PROMPTS.reflector).toContain("Do not add a rule that names a store_sku");
+    expect(PROMPTS.reflector).toContain("Those belong in the diary only");
   });
 
   it("has validator prompt template", () => {

@@ -614,6 +614,7 @@ merge:
 
 RULES:
 - Prefer helpful on an existing bullet ID over add when the lesson is already covered by a bullet in <existing_playbook>.
+- Do not add a rule that names a store_sku, a 7+ digit product id, a codex-… bead id, or a single session outcome. Those belong in the diary only; prefer helpful on an existing bullet id over add.
 - Every key listed above MUST be present in each delta object (use null for unknowns).
 - For "add" deltas, set "kind", "type", "scope" (and harmful "reason") to null UNLESS the
   value is EXACTLY one of the literal strings listed — never invent new enum values.

@@ -76,6 +76,30 @@ export function resolveWorkspaceFilter(workspace?: string): string | undefined {
 }
 
 /**
+ * Workspace-scoped bullet match: canonical path equality, or a basename-only
+ * legacy stored value (no separator, no `~`) equal to the effective workspace's
+ * basename. Reads only; new rules always store canonical paths.
+ */
+function bulletWorkspaceMatches(stored: string | undefined, effectiveWorkspace: string | undefined): boolean {
+  if (!effectiveWorkspace || typeof stored !== "string") return false;
+  const trimmed = stored.trim();
+  if (trimmed === "") return false;
+  const isBasenameOnly = !trimmed.startsWith("~") && !trimmed.includes("/") && !trimmed.includes("\\");
+  if (isBasenameOnly) return trimmed === path.basename(effectiveWorkspace);
+  return resolveWorkspaceFilter(trimmed) === effectiveWorkspace;
+}
+
+/** Confirmed junk markers in cass history hits (Codex temp-worktree system prompts). */
+const CASS_HISTORY_JUNK_PATH_MARKER = "xmodel-doc-peer-";
+const CASS_HISTORY_JUNK_SNIPPET_MARKER = "<recommended_plugins>";
+
+function isJunkCassHistoryHit(hit: CassSearchHit): boolean {
+  const sourcePath = String(hit.source_path ?? (hit as any).sessionPath ?? "");
+  const snippet = String(hit.snippet ?? "");
+  return sourcePath.includes(CASS_HISTORY_JUNK_PATH_MARKER) || snippet.includes(CASS_HISTORY_JUNK_SNIPPET_MARKER);
+}
+
+/**
  * ReDoS-safe matcher for deprecated patterns.
  * Supports both literal substring patterns and regex-like patterns.
  */
@@ -406,8 +430,7 @@ export async function generateContextResult(
     // For workspace rules, only include if a workspace is resolved AND matches.
     // Canonicalize the stored workspace too so symlink/relative differences in
     // how the rule was authored don't defeat the exact-match comparison.
-    if (!effectiveWorkspace || !b.workspace) return false;
-    return resolveWorkspaceFilter(b.workspace) === effectiveWorkspace;
+    return bulletWorkspaceMatches(b.workspace, effectiveWorkspace);
   });
 
   const scoringMeta: ScoreBulletsMeta = { semanticMode: "keyword" };
@@ -448,11 +471,15 @@ export async function generateContextResult(
   const cassResult = await safeCassSearchWithDegraded(cassQuery, {
     limit: flags.history ?? config.maxHistoryInContext,
     days: flags.days ?? config.sessionLookbackDays,
-    workspace: flags.workspace,
+    // Only an explicit --workspace scopes history (canonicalized); absent flag
+    // keeps history unscoped rather than silently defaulting to cwd.
+    workspace: typeof flags.workspace === "string" && flags.workspace.trim() !== ""
+      ? (effectiveWorkspace ?? flags.workspace)
+      : flags.workspace,
     timeout: CASS_HISTORY_TIMEOUT_SECONDS,
   }, config.cassPath, config);
   options.onProgress?.({ phase: "cass_search", kind: "done", message: "History search complete" });
-  cassHits = cassResult.hits;
+  cassHits = cassResult.hits.filter((h) => !isJunkCassHistoryHit(h));
   if (cassResult.degraded || cassResult.remoteDegraded) {
     degraded = {
       cass: cassResult.degraded,
@@ -584,8 +611,7 @@ export async function contextWithoutCass(
 
     const activeBullets = getActiveBullets(playbook).filter((b) => {
       if (b.scope !== "workspace") return true;
-      if (!effectiveWorkspace || !b.workspace) return false;
-      return resolveWorkspaceFilter(b.workspace) === effectiveWorkspace;
+      return bulletWorkspaceMatches(b.workspace, effectiveWorkspace);
     });
 
     const scoredBullets: ScoredBullet[] = activeBullets.map(b => {

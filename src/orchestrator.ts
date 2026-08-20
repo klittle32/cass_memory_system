@@ -10,7 +10,10 @@ import { curatePlaybook } from "./curate.js";
 import { expandPath, log, warn, error, now, fileExists, resolveRepoDir, generateBulletId, hashContent, jaccardSimilarity, ensureDir, parseInlineFeedback } from "./utils.js";
 import { withLock } from "./lock.js";
 import { extractRuleIdsFromTranscript, classifySessionOutcome, recordOutcome, applyOutcomeFeedback, type OutcomeInput } from "./outcome.js";
+import { calculateMaturityState } from "./scoring.js";
+import type { FeedbackEvent } from "./types.js";
 import path from "node:path";
+import fsSync from "node:fs";
 
 export interface ReflectionOptions {
   days?: number;
@@ -51,6 +54,105 @@ function isActiveBullet(bullet: PlaybookBullet): boolean {
   return !bullet.deprecated && bullet.maturity !== "deprecated" && bullet.state !== "retired";
 }
 
+/**
+ * Canonical workspace identity: expand `~`, resolve to an absolute path, then
+ * best-effort realpath. Basename-only legacy values (no separator, no `~`) are
+ * returned unchanged so they are compared as names, never resolved against cwd.
+ */
+function canonicalWorkspace(workspace: string | undefined): string | undefined {
+  if (typeof workspace !== "string") return undefined;
+  const trimmed = workspace.trim();
+  if (trimmed === "") return undefined;
+  if (!trimmed.startsWith("~") && !trimmed.includes("/") && !trimmed.includes("\\")) {
+    return trimmed;
+  }
+  let resolved: string;
+  try {
+    resolved = path.resolve(expandPath(trimmed));
+  } catch {
+    return trimmed;
+  }
+  try {
+    return fsSync.realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+function bulletScopeKey(bullet: PlaybookBullet): { scope: string; workspace?: string } {
+  const scope = bullet.scope || "global";
+  return {
+    scope,
+    workspace: scope === "workspace" ? canonicalWorkspace(bullet.workspace) : undefined,
+  };
+}
+
+function sameScopeKey(a: { scope: string; workspace?: string }, b: { scope: string; workspace?: string }): boolean {
+  return a.scope === b.scope && (a.workspace ?? "") === (b.workspace ?? "");
+}
+
+function feedbackEventKey(e: FeedbackEvent): string {
+  return JSON.stringify([
+    e.type,
+    e.timestamp,
+    e.sessionPath ?? null,
+    e.reason ?? null,
+    e.context ?? null,
+    e.decayedValue ?? null,
+  ]);
+}
+
+const MERGE_PLACEHOLDER_SESSIONS = new Set(["merged-operation", "merged"]);
+const MERGE_PLACEHOLDER_AGENTS = new Set(["unknown"]);
+
+/**
+ * Carry deduplicated evidence and provenance from merge sources onto the
+ * destination (a new successor or an existing compatible replacement), then
+ * recompute maturity from the carried events. Counters are derived from the
+ * event array, never summed from legacy source counters.
+ */
+function applyMergeCarryover(
+  dest: PlaybookBullet,
+  sources: PlaybookBullet[],
+  config: Config,
+  destIsNew: boolean
+): void {
+  const events: FeedbackEvent[] = [];
+  const seen = new Set<string>();
+  for (const e of [...(dest.feedbackEvents || []), ...sources.flatMap((s) => s.feedbackEvents || [])]) {
+    const key = feedbackEventKey(e);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    events.push(e);
+  }
+  dest.feedbackEvents = events;
+  dest.helpfulCount = events.filter((e) => e.type === "helpful").length;
+  dest.harmfulCount = events.filter((e) => e.type === "harmful").length;
+
+  const baseSessions = destIsNew
+    ? (dest.sourceSessions || []).filter((s) => !MERGE_PLACEHOLDER_SESSIONS.has(s))
+    : (dest.sourceSessions || []);
+  const baseAgents = destIsNew
+    ? (dest.sourceAgents || []).filter((a) => !MERGE_PLACEHOLDER_AGENTS.has(a))
+    : (dest.sourceAgents || []);
+  const sessions = [...new Set([...baseSessions, ...sources.flatMap((s) => s.sourceSessions || [])])];
+  const agents = [...new Set([...baseAgents, ...sources.flatMap((s) => s.sourceAgents || [])])];
+  if (sessions.length > 0) dest.sourceSessions = sessions;
+  if (agents.length > 0) dest.sourceAgents = agents;
+
+  const lastValidated = [dest.lastValidatedAt, ...sources.map((s) => s.lastValidatedAt)]
+    .filter((v): v is string => typeof v === "string" && v !== "")
+    .sort()
+    .pop();
+  if (lastValidated) dest.lastValidatedAt = lastValidated;
+
+  const maturity = calculateMaturityState(dest, config);
+  // A merge never auto-deprecates its own destination; the scoring ladder may
+  // still demote it on a later feedback pass.
+  if (maturity !== "deprecated") dest.maturity = maturity;
+  dest.updatedAt = now();
+}
+
 function findFirstHashMatch(playbook: Playbook, content: string): PlaybookBullet | undefined {
   const h = hashContent(content);
   return playbook.bullets.find((b) => hashContent(b.content) === h);
@@ -81,6 +183,10 @@ export async function orchestrateReflection(
   options: ReflectionOptions
 ): Promise<ReflectionOutcome> {
   const logPath = expandPath(getProcessedLogPath(options.workspace));
+  const canonicalRunWorkspace =
+    typeof options.workspace === "string" && options.workspace.trim() !== ""
+      ? canonicalWorkspace(options.workspace)
+      : undefined;
   const globalPath = expandPath(config.playbookPath);
   const repoDir = await resolveRepoDir();
   const repoPath = repoDir ? path.join(repoDir, "playbook.yaml") : null;
@@ -155,6 +261,11 @@ export async function orchestrateReflection(
 
       try {
         const diary = await generateDiary(sessionPath, config);
+        // Workspace identity for filing: only when the caller scoped this run.
+        // Not resaved; the diary on disk keeps whatever generateDiary wrote.
+        if (canonicalRunWorkspace) {
+          diary.workspace = canonicalRunWorkspace;
+        }
 
         // Quick check for empty sessions to save tokens
         const content = await cassExport(sessionPath, "text", config.cassPath, config) || "";
@@ -291,8 +402,20 @@ export async function orchestrateReflection(
       // Pre-process deltas to decompose 'merge' operations into atomic add/deprecate actions.
       // This allows us to route deprecations to their specific playbooks (Repo vs Global)
       // while adding the new merged rule to the default location (Global).
+      //
+      // Source deprecations are deferred: they are only applied after the
+      // destination bullet is confirmed to exist in its locked target playbook,
+      // and the destination receives the sources' deduplicated evidence and
+      // provenance first. A skipped/failed destination never retires sources.
       const processedDeltas: PlaybookDelta[] = [];
-      
+      type MergeCarryover = {
+        destId: string;
+        destIsNew: boolean;
+        sources: PlaybookBullet[];
+        deprecations: PlaybookDelta[];
+      };
+      const carryovers: MergeCarryover[] = [];
+
       for (const delta of allDeltas) {
         if (delta.type !== "merge") {
           processedDeltas.push(delta);
@@ -301,6 +424,42 @@ export async function orchestrateReflection(
 
         const mergedContent = delta.mergedContent;
         const threshold = typeof config.dedupSimilarityThreshold === "number" ? config.dedupSimilarityThreshold : 0.85;
+
+        // Resolve every source before emitting anything.
+        const sourceIds = [...new Set(delta.bulletIds)];
+        const sources: PlaybookBullet[] = [];
+        const missing: string[] = [];
+        for (const id of sourceIds) {
+          const b = findBullet(freshMerged, id);
+          if (b) sources.push(b);
+          else missing.push(id);
+        }
+        if (missing.length > 0 || sources.length === 0) {
+          warn(`[orchestrator] Skipping merge delta: missing source bullet(s) ${missing.join(", ") || "(none)"}`);
+          continue;
+        }
+
+        // Sources must agree on canonical scope/workspace; never pick the first.
+        const scopeKey = bulletScopeKey(sources[0]!);
+        const disagreeing = sources.filter((b) => !sameScopeKey(bulletScopeKey(b), scopeKey));
+        if (disagreeing.length > 0) {
+          warn(
+            `[orchestrator] Skipping merge delta: sources disagree on scope/workspace (${sources
+              .map((b) => `${b.id}=${b.scope || "global"}:${b.workspace ?? ""}`)
+              .join(", ")})`
+          );
+          continue;
+        }
+        // Upgrade a shared legacy basename to the run's canonical workspace.
+        let destWorkspace = scopeKey.workspace;
+        if (
+          destWorkspace &&
+          canonicalRunWorkspace &&
+          destWorkspace !== canonicalRunWorkspace &&
+          destWorkspace === path.basename(canonicalRunWorkspace)
+        ) {
+          destWorkspace = canonicalRunWorkspace;
+        }
 
         // If the merged content already exists (or is very similar), prefer deprecating into it
         // rather than creating a duplicate replacement that curation might skip.
@@ -318,79 +477,165 @@ export async function orchestrateReflection(
             : findBestActiveSimilarBullet(freshMerged, mergedContent, threshold);
 
         if (replacement) {
-          for (const id of delta.bulletIds) {
+          const replacementKey = bulletScopeKey(replacement);
+          const compatible =
+            sameScopeKey(replacementKey, scopeKey) ||
+            (replacementKey.scope === "workspace" &&
+              scopeKey.scope === "workspace" &&
+              replacementKey.workspace === destWorkspace);
+          if (!compatible) {
+            warn(
+              `[orchestrator] Skipping merge delta: existing replacement ${replacement.id} has incompatible scope/workspace`
+            );
+            continue;
+          }
+          const deprecations: PlaybookDelta[] = [];
+          for (const id of sourceIds) {
             // If one of the merged bullets is already the best replacement, keep it active and only deprecate the others.
             if (id === replacement.id) continue;
-            processedDeltas.push({
+            deprecations.push({
               type: "deprecate",
               bulletId: id,
               reason: `Merged into existing ${replacement.id}`,
               replacedBy: replacement.id
             });
           }
+          carryovers.push({
+            destId: replacement.id,
+            destIsNew: false,
+            sources: sources.filter((b) => b.id !== replacement.id),
+            deprecations,
+          });
           continue;
         }
 
         const newBulletId = generateBulletId();
 
-        // 1. Create the new merged rule
+        // 1. Create the new merged rule, filed under the sources' scope/workspace.
         processedDeltas.push({
           type: "add",
           bullet: {
             id: newBulletId, // Pre-assign ID so deprecate deltas can reference it
             content: mergedContent,
             category: "merged",
-            tags: []
+            tags: [...new Set(sources.flatMap((b) => b.tags || []))],
+            scope: scopeKey.scope as PlaybookBullet["scope"],
+            ...(destWorkspace ? { workspace: destWorkspace } : {})
           },
-          // Merge deltas don't carry sourceSession, so we use a placeholder
+          // Merge deltas don't carry sourceSession, so we use a placeholder;
+          // it is replaced by the sources' provenance once the bullet exists.
           sourceSession: "merged-operation",
           reason: delta.reason || "Merged from existing rules"
         });
 
-        // 2. Deprecate the old rules
-        for (const id of delta.bulletIds) {
-          processedDeltas.push({
-            type: "deprecate",
+        // 2. Deprecate the old rules — deferred until the successor is confirmed.
+        carryovers.push({
+          destId: newBulletId,
+          destIsNew: true,
+          sources,
+          deprecations: sourceIds.map((id) => ({
+            type: "deprecate" as const,
             bulletId: id,
             reason: `Merged into ${newBulletId}`,
             replacedBy: newBulletId
-          });
-        }
+          })),
+        });
       }
 
       // Partition deltas (Routing Logic)
-      const globalDeltas: PlaybookDelta[] = [];
-      const repoDeltas: PlaybookDelta[] = [];
+      const routeDeltas = (deltas: PlaybookDelta[]): { globalDeltas: PlaybookDelta[]; repoDeltas: PlaybookDelta[] } => {
+        const globalDeltas: PlaybookDelta[] = [];
+        const repoDeltas: PlaybookDelta[] = [];
+        for (const delta of deltas) {
+          let routed = false;
 
-      for (const delta of processedDeltas) {
-        let routed = false;
-        
-        // Feedback/Replace/Delete: Must target existing ID
-        if ('bulletId' in delta && delta.bulletId) {
-          if (repoPlaybook && findBullet(repoPlaybook, delta.bulletId)) {
-            repoDeltas.push(delta);
-            routed = true;
-          } else if (findBullet(globalPlaybook, delta.bulletId)) {
+          // Feedback/Replace/Delete: Must target existing ID
+          if ('bulletId' in delta && delta.bulletId) {
+            if (repoPlaybook && findBullet(repoPlaybook, delta.bulletId)) {
+              repoDeltas.push(delta);
+              routed = true;
+            } else if (findBullet(globalPlaybook, delta.bulletId)) {
+              globalDeltas.push(delta);
+              routed = true;
+            }
+          }
+
+          // New rules or orphans default to Global
+          if (!routed) {
             globalDeltas.push(delta);
-            routed = true;
           }
         }
+        return { globalDeltas, repoDeltas };
+      };
 
-        // New rules or orphans default to Global
-        if (!routed) {
-           globalDeltas.push(delta);
+      const combineResults = (a: CurationResult | undefined, b: CurationResult): CurationResult => {
+        if (!a) return b;
+        return {
+          playbook: b.playbook,
+          applied: a.applied + b.applied,
+          skipped: a.skipped + b.skipped,
+          conflicts: [...a.conflicts, ...b.conflicts],
+          promotions: [...a.promotions, ...b.promotions],
+          inversions: [...a.inversions, ...b.inversions],
+          pruned: a.pruned + b.pruned,
+          decisionLog: [...(a.decisionLog || []), ...(b.decisionLog || [])],
+        };
+      };
+
+      // Apply Curation (pass 1: everything except deferred merge deprecations).
+      // curatePlaybook mutates the target playbook in place.
+      const pass1 = routeDeltas(processedDeltas);
+      if (pass1.globalDeltas.length > 0) {
+        globalResult = curatePlaybook(globalPlaybook, pass1.globalDeltas, config, freshMerged);
+      }
+      if (pass1.repoDeltas.length > 0 && repoPlaybook && repoPath) {
+        repoResult = curatePlaybook(repoPlaybook, pass1.repoDeltas, config, freshMerged);
+      }
+
+      // Pass 2: confirm each merge destination exists in its locked target
+      // playbook, carry evidence/provenance onto it, then retire the sources.
+      const deferredDeprecations: PlaybookDelta[] = [];
+      let globalCarried = false;
+      let repoCarried = false;
+      for (const co of carryovers) {
+        const repoDest = repoPlaybook ? findBullet(repoPlaybook, co.destId) : undefined;
+        const dest = repoDest ?? findBullet(globalPlaybook, co.destId);
+        if (!dest || !isActiveBullet(dest)) {
+          warn(
+            `[orchestrator] Merge destination ${co.destId} was not persisted; keeping ${co.sources
+              .map((b) => b.id)
+              .join(", ")} active`
+          );
+          continue;
+        }
+        applyMergeCarryover(dest, co.sources, config, co.destIsNew);
+        if (repoDest) repoCarried = true;
+        else globalCarried = true;
+        deferredDeprecations.push(...co.deprecations);
+      }
+
+      if (deferredDeprecations.length > 0) {
+        const pass2 = routeDeltas(deferredDeprecations);
+        if (pass2.globalDeltas.length > 0) {
+          globalResult = combineResults(
+            globalResult,
+            curatePlaybook(globalPlaybook, pass2.globalDeltas, config, freshMerged)
+          );
+        }
+        if (pass2.repoDeltas.length > 0 && repoPlaybook && repoPath) {
+          repoResult = combineResults(
+            repoResult,
+            curatePlaybook(repoPlaybook, pass2.repoDeltas, config, freshMerged)
+          );
         }
       }
 
-      // Apply Curation
-      if (globalDeltas.length > 0) {
-        globalResult = curatePlaybook(globalPlaybook, globalDeltas, config, freshMerged);
-        await savePlaybook(globalResult.playbook, globalPath, { updateLastReflection: true });
+      if (globalResult || globalCarried) {
+        await savePlaybook(globalPlaybook, globalPath, { updateLastReflection: true });
       }
 
-      if (repoDeltas.length > 0 && repoPlaybook && repoPath) {
-        repoResult = curatePlaybook(repoPlaybook, repoDeltas, config, freshMerged);
-        await savePlaybook(repoResult.playbook, repoPath, { updateLastReflection: true });
+      if ((repoResult || repoCarried) && repoPath) {
+        await savePlaybook(repoPlaybook!, repoPath, { updateLastReflection: true });
       }
     };
 

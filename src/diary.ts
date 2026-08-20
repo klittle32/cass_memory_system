@@ -198,6 +198,9 @@ function extractSessionMetadata(sessionPath: string): { agent: string; workspace
   else if (lower.includes(".codex")) agent = "codex";
   else if (lower.includes(".aider")) agent = "aider";
   else if (lower.includes(".pi/agent/sessions") || lower.includes(".pi\\agent\\sessions")) agent = "pi_agent";
+  else if (lower.includes(".grok/sessions") || lower.includes(".grok\\sessions")) agent = "grok";
+  else if (lower.includes(".prime/agent/sessions") || lower.includes(".prime\\agent\\sessions")) agent = "prime";
+  else if (lower.includes(".letta/transcripts") || lower.includes(".letta\\transcripts")) agent = "letta";
   
   return { agent };
 }
