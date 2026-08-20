@@ -157,3 +157,11 @@ cm privacy allow grok
 cm privacy allow letta_code
 cm privacy allow prime_agent
 ```
+
+**Operator note (2026-08-20):** one-time merge-gold archive repair run against
+`~/.cass-memory/playbook.yaml` with a throwaway bun script (not in repo).
+238 missing-successor groups: 109 archive successors restored with carried
+evidence (2970 helpful / 3349 events, 96 workspace + 13 global); 65 voted
+sources reactivated in 23 scope-disagreeing + 52 archive-missing groups;
+58 zero-helpful successors left out; 224 zero-helpful sources left retired.
+Backup: `playbook.yaml.bak-merge-repair-20260820T180205Z`. Archive untouched.
