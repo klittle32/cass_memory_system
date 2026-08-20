@@ -6,6 +6,7 @@ import {
   isAbsolutePath,
   joinPath,
   expandPath,
+  extractAgentFromPath,
 } from "../src/utils.js";
 import path from "node:path";
 import os from "node:os";
@@ -247,5 +248,29 @@ describe("Path Utilities", () => {
     test("toForwardSlashes handles only backslashes", () => {
       expect(toForwardSlashes("\\\\\\")).toBe("///");
     });
+  });
+});
+
+describe("extractAgentFromPath", () => {
+  test("maps cass session-store prefixes to cass agent slugs", () => {
+    expect(extractAgentFromPath("/Users/kyle/.grok/sessions/abc/updates.jsonl")).toBe("grok");
+    expect(extractAgentFromPath("/Users/kyle/.prime/agent/sessions/abc.jsonl")).toBe("prime_agent");
+    expect(extractAgentFromPath("/Users/kyle/.letta/transcripts/agent-1/conv-1/transcript.jsonl")).toBe("letta_code");
+    expect(extractAgentFromPath("C:\\Users\\kyle\\.grok\\sessions\\abc\\updates.jsonl")).toBe("grok");
+    expect(extractAgentFromPath("C:\\Users\\kyle\\.prime\\agent\\sessions\\abc.jsonl")).toBe("prime_agent");
+    expect(extractAgentFromPath("C:\\Users\\kyle\\.letta\\transcripts\\agent-1\\transcript.jsonl")).toBe("letta_code");
+  });
+
+  test("does not confuse workspace names with harness directories", () => {
+    expect(extractAgentFromPath("/Users/kyle/.grok/sessions/%2FUsers%2Fkyle%2FCode%2Fletta-flywheel/id/updates.jsonl")).toBe("grok");
+    expect(extractAgentFromPath("/Users/kyle/.claude/projects/-Users-kyle-Code-letta-code/session.jsonl")).toBe("claude");
+  });
+
+  test("keeps existing claude/cursor/codex/aider/pi_agent detections", () => {
+    expect(extractAgentFromPath("/Users/kyle/.claude/projects/x/session.jsonl")).toBe("claude");
+    expect(extractAgentFromPath("/Users/kyle/.cursor/projects/x/session.jsonl")).toBe("cursor");
+    expect(extractAgentFromPath("/Users/kyle/.codex/sessions/x.jsonl")).toBe("codex");
+    expect(extractAgentFromPath("/Users/kyle/.aider/chat.jsonl")).toBe("aider");
+    expect(extractAgentFromPath("/Users/kyle/.pi/agent/sessions/x.jsonl")).toBe("pi_agent");
   });
 });

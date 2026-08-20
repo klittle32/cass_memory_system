@@ -31,6 +31,7 @@ import {
   now, 
   ensureDir, 
   expandPath,
+  extractAgentFromPath,
   log,
   warn,
   error as logError,
@@ -43,7 +44,10 @@ import { withLock } from "./lock.js";
 // --- Helpers ---
 
 function normalizeAgentName(agent: string | undefined): string {
-  return (agent || "").trim().toLowerCase();
+  const n = (agent || "").trim().toLowerCase();
+  if (n === "letta") return "letta_code";
+  if (n === "prime") return "prime_agent";
+  return n;
 }
 
 async function appendCrossAgentAuditLog(
@@ -188,21 +192,7 @@ export function formatRawSession(content: string, ext: string): string {
 }
 
 function extractSessionMetadata(sessionPath: string): { agent: string; workspace?: string } {
-  const normalized = path.normalize(sessionPath);
-  const lower = normalized.toLowerCase();
-  
-  // Detect agent
-  let agent = "unknown";
-  if (lower.includes(".claude")) agent = "claude";
-  else if (lower.includes(".cursor")) agent = "cursor";
-  else if (lower.includes(".codex")) agent = "codex";
-  else if (lower.includes(".aider")) agent = "aider";
-  else if (lower.includes(".pi/agent/sessions") || lower.includes(".pi\\agent\\sessions")) agent = "pi_agent";
-  else if (lower.includes(".grok/sessions") || lower.includes(".grok\\sessions")) agent = "grok";
-  else if (lower.includes(".prime/agent/sessions") || lower.includes(".prime\\agent\\sessions")) agent = "prime";
-  else if (lower.includes(".letta/transcripts") || lower.includes(".letta\\transcripts")) agent = "letta";
-  
-  return { agent };
+  return { agent: extractAgentFromPath(sessionPath) };
 }
 
 async function enrichWithRelatedSessions(

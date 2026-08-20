@@ -106,11 +106,29 @@ describe("privacy command (unit)", () => {
       expect(parsed.data.crossAgent.enabled).toBeTrue();
       expect(parsed.data.crossAgent.consentGiven).toBeTrue();
       expect(typeof parsed.data.crossAgent.consentDate).toBe("string");
-      expect(parsed.data.crossAgent.agents).toEqual(["claude", "cursor", "codex", "aider", "pi_agent"]);
+      expect(parsed.data.crossAgent.agents).toEqual([
+        "claude",
+        "cursor",
+        "codex",
+        "aider",
+        "pi_agent",
+        "grok",
+        "letta_code",
+        "prime_agent",
+      ]);
 
       const persisted = JSON.parse(await readFile(env.configPath, "utf-8"));
       expect(persisted.crossAgent.enabled).toBeTrue();
-      expect(persisted.crossAgent.agents).toEqual(["claude", "cursor", "codex", "aider", "pi_agent"]);
+      expect(persisted.crossAgent.agents).toEqual([
+        "claude",
+        "cursor",
+        "codex",
+        "aider",
+        "pi_agent",
+        "grok",
+        "letta_code",
+        "prime_agent",
+      ]);
     }, "privacy-enable-default");
   });
 

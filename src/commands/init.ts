@@ -171,7 +171,7 @@ export async function initCommand(options: InitOptions) {
         consentGiven: true,
         consentDate: new Date().toISOString(),
         // Default to common known agents; user can refine via `cm privacy allow/deny`.
-        agents: ["claude", "cursor", "codex", "aider", "pi_agent"],
+        agents: ["claude", "cursor", "codex", "aider", "pi_agent", "grok", "letta_code", "prime_agent"],
       };
       console.log(chalk.green(`\n${icon("success")} Cross-agent enrichment enabled.\n`));
     } else {

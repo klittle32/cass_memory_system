@@ -129,3 +129,31 @@ cd ~/Code/cass_memory_system
 bun run build
 cp -p dist/cass-memory ~/.local/bin/cm
 ```
+
+## 2026-08-20 — cass agent slugs for Grok/Letta/Prime (#1)
+
+**Problem:** Path detection landed as `grok` / `letta` / `prime`, but cass
+emits `grok` / `letta_code` / `prime_agent`. Kyle's live
+`crossAgent.agents` allowlist is the five-agent init default, so even a
+correct diary slug would still be filtered from related-session
+enrichment. Schema `[]` means unrestricted; a populated allowlist does not.
+
+**Fix:**
+- `src/utils.ts` `extractAgentFromPath` (and diary via that helper) emits
+  cass slugs. POSIX + Windows prefixes unchanged.
+- Fresh `cm init` / `cm privacy enable` fallback allowlist adds `grok`,
+  `letta_code`, `prime_agent`. Existing `~/.cass-memory/config.json` is
+  not rewritten; run `cm privacy allow grok` (and the other two) on
+  already-inited homes.
+- `letta`/`prime` normalize to `letta_code`/`prime_agent` so a short-lived
+  wrong slug still compares.
+
+**Install:**
+```bash
+cd ~/Code/cass_memory_system
+bun run build
+cp -p dist/cass-memory ~/.local/bin/cm
+cm privacy allow grok
+cm privacy allow letta_code
+cm privacy allow prime_agent
+```

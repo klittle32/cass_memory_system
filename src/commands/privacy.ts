@@ -19,7 +19,10 @@ import {
 } from "../utils.js";
 
 function normalizeAgentName(agent: string): string {
-  return agent.trim().toLowerCase();
+  const n = agent.trim().toLowerCase();
+  if (n === "letta") return "letta_code";
+  if (n === "prime") return "prime_agent";
+  return n;
 }
 
 function migrateDeprecatedLlmConfig(raw: Partial<Config>): Partial<Config> {
@@ -206,7 +209,7 @@ export async function privacyCommand(
             ? Array.from(new Set(requested)).sort()
             : discoveredAgents.length > 0
               ? discoveredAgents.sort()
-              : ["claude", "cursor", "codex", "aider", "pi_agent"];
+              : ["claude", "cursor", "codex", "aider", "pi_agent", "grok", "letta_code", "prime_agent"];
 
         config.crossAgent = {
           ...config.crossAgent,

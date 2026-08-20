@@ -1818,8 +1818,8 @@ export function extractAgentFromPath(sessionPath: string): string {
   if (lower.includes(".aider")) return "aider";
   if (lower.includes(".pi/agent/sessions") || lower.includes(".pi\\agent\\sessions")) return "pi_agent";
   if (lower.includes(".grok/sessions") || lower.includes(".grok\\sessions")) return "grok";
-  if (lower.includes(".prime/agent/sessions") || lower.includes(".prime\\agent\\sessions")) return "prime";
-  if (lower.includes(".letta/transcripts") || lower.includes(".letta\\transcripts")) return "letta";
+  if (lower.includes(".prime/agent/sessions") || lower.includes(".prime\\agent\\sessions")) return "prime_agent";
+  if (lower.includes(".letta/transcripts") || lower.includes(".letta\\transcripts")) return "letta_code";
   return "unknown";
 }
 
